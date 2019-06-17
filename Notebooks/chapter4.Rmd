@@ -1,0 +1,14 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Chapter 4 examples  
+
+Multiplicative can produce normal distribution.  
+```{r}
+prod(1+ runif(12,0,0.1))
+
+plot(density(purrr::map_dbl(1:100, ~ prod(1+runif(12,0,0.01)))))
+
+```
