@@ -5,10 +5,194 @@ output: html_notebook
 
 Chapter 4 examples  
 
+```{r}
+library(tidyverse)
+library(rethinking)
+
+```
+
+
 Multiplicative can produce normal distribution.  
 ```{r}
 prod(1+ runif(12,0,0.1))
-
 plot(density(purrr::map_dbl(1:100, ~ prod(1+runif(12,0,0.01)))))
+```
+
+
+
+Prior predictive distribution  
+
+```{r}
+## mu ~ N(178,20)
+## sigma ~ U(0,50)
+
+## test out different values of sigma and mu  
+
+sample_mu <- rnorm(1e5,178,20)  
+sample_sigma <- runif(1e5,0,5)
+sample_h <- rnorm(1e5,sample_mu,sample_sigma)
+rethinking::dens(sample_h)
 
 ```
+
+
+
+
+
+**Grid approximation**    
+```{r}
+data(Howell1)
+d <- Howell1
+
+d2 <- d %>%
+  filter(age>=18)
+
+mu_list <- seq(140,160,length.out = 200)
+sigma_list <- seq(4,9,length.out = 200)
+post <- crossing(mu_list,sigma_list)
+
+
+ll_fun <- function(heights,x) {
+  sum(dnorm(
+    heights,
+    #mean = post$mu_list[x],
+    #sd = post$sigma_list[x],
+    mean = as_vector(post[x,"mu_list"]),
+    sd =   as_vector(post[x,"sigma_list"]),
+    log = TRUE
+  ))
+}
+
+## log likelhood  
+## log of posterior will be ll + prior(mu) + prior(sigma)  
+post <- post %>%
+  mutate(ll = map_dbl(1:nrow(post), ~ ll_fun(d2$height, .x)),
+         prod = ll + dnorm(mu_list,178,20, log = TRUE) + dunif(sigma_list,0,50,log = TRUE),
+         prob = exp(prod - max(prod)))
+```
+
+`post` now describes the posterior distribution of `mu` and `sigma`.  
+
+Samplgin
+
+Visualize the grid  
+```{r}
+post %>%
+  dplyr::sample_n(.,1e4,weight = prob, replace = TRUE) %>%
+  ggplot(aes(mu_list,sigma_list)) + geom_jitter(aes(color = prob)) + scale_color_gradient2(midpoint = 0.5)
+
+```
+
+
+**Quadratice approximation**   
+We will repeat the above using maximum a posteriori estimate (map)
+```{r}
+flist <- alist(
+  height ~ dnorm(mu, sigma),
+  mu ~ dnorm(178,20),
+  sigma ~ dunif(0,50)
+)
+
+## fit the model  
+
+m4_1 <- map(flist,data = d2)
+
+```
+
+Inspect it 
+```{r}
+precis(m4_1)
+
+## sampling posterior  
+post <- extract.samples(m4_1,n = 1e4)
+head(post)
+ 
+```
+
+#### Adding a predictor  
+
+```{r}
+d2 %>%
+  ggplot(.,aes(height,weight)) + geom_jitter()
+```
+
+
+Modeling height and weight    
+
+```{r}
+flist <- alist(
+  height ~dnorm(mu,sigma),
+  mu <- a + b*weight,
+  a ~ dnorm(178,100),
+  b ~ dnorm(0,10),
+  sigma <- dunif(0,50)
+)
+
+m4_3 <- map(flist,data = d2)
+
+```
+
+
+We can extract samples from this posterior distribution  
+```{r}
+post <- extract.samples(m4_3)
+post %>%
+  head
+
+
+post %>%
+  ggplot(aes(a,b)) + geom_line()
+
+```
+
+What if we'd like to visualzie the uncertainity?  The `link` function in the `rethinking` package, lets us draw a posterior distribution of `mu`, for any weight value we provide.   
+
+```{r}
+mu <- link(m4_3)
+
+str(mu)
+
+```
+
+Each column is an individual and the rows are the posteriro distribution for that partiuclar weight.  
+
+We can define a sequnece of weights and get a posterior distribution for those weights.  
+
+```{r}
+weight_seq <- seq(25,70,1)
+mu <- link(m4_3, data = data.frame(weight = weight_seq))
+str(mu)
+
+plot(height ~ weight, d2, type = "n")
+walk(1:1000, ~points(weight_seq,mu[.x,],pch = 16,col = col.alpha(rangi2,0.1)))
+
+```
+
+*Prediction intervals*  
+
+To generate prediction intervals, here's what we need to do  
+1.  For a given weight, sample from the posterior distribution with the `mu` and `sigma`. The `mu` is calculated by a + b*weight   
+The `post` df should have everything we need  
+
+```{r}
+post <- extract.samples(m4_3)
+head(post)
+
+## Function that samples from the posterior distribution  
+sim_fn <- function(weight) {
+  rnorm(nrow(post), mean = post$a + post$b*weight,sd = post$sigma)
+}
+
+## Create simulate heights for all sequence of weights  
+sim_list <- purrr::map(weight_seq, ~ sim_fn(.x)) %>% do.call(cbind,.) %>% as.data.frame()
+height_pi <- purrr::map(sim_list, ~ PI(.x))
+
+```
+
+
+
+
+
+
+
+
