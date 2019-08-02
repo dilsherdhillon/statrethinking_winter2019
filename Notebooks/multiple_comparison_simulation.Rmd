@@ -1,0 +1,219 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+library(tidyverse)
+library(rethinking)
+library(brms)
+
+```
+
+
+```{r}
+treatmentA <-rep(c("snoopy", "ginger", "sugar", "spicy", "lisa"))
+treatmentB <- rep(c("watch", "coffee", "notebook", "phone", "headset"))
+
+d <- tidyr::crossing(treatmentA, treatmentB) %>%
+  mutate(response = rnorm(nrow(.), 10, 5))
+fit <- lm(response ~ treatmentA, data = d)
+
+rm(d)
+
+sim_aov <- function(seed) {
+  set.seed(seed)
+  d <- tidyr::crossing(treatmentA, treatmentB) %>%
+    mutate(response = rnorm(nrow(.), 10, 5))
+  
+  fit <- update(fit, data = d)
+  
+  n <-
+    emmeans::emmeans(fit, pairwise ~ treatmentA, adjust = "tukey") %>%
+    pluck(2) %>%
+    tbl_df() %>%
+    filter(p.value < 0.05) %>%
+    nrow(.)
+  n
+}
+
+
+seeds <- rep(1:1000)
+
+sig_p_values <- purrr::map(seeds, function(x)
+  sim_aov(seed = x)) %>%
+  simplify()
+
+## total number of significnat pairwise comparisons?
+sum(sig_p_values)
+
+## How many times did we see atleast one pairwise comparison significant?
+(1000 - sum(sig_p_values == 0)) / 1000
+
+as.data.frame(cbind(seeds, sig_p_values)) %>%
+  ggplot(., aes(seeds, sig_p_values)) + geom_point()
+
+```
+
+
+
+
+
+For a bayesian multilevel model, we will treat fit each batch of coefficients as a random effect with varying intercepts.  Once we have the posteriors for each group level effect, we'll calculate a 95% uncertainity interval and check whether 0 is included in it.  If 0 is not included in the difference, that indicates that there is a 95% probability that the estimate is something other than zero, mimicking the p-value significance we calculated.    
+
+
+
+
+```{r}
+
+bayes_aov_sim <- function(seed) {
+  
+  set.seed(seed)
+d_bayes <- tibble(treatmentA = rep(c(1,2,3,4,5), each = 3), response = rnorm(15,10,20))
+
+data_list <- list(
+  treatmentA = as.integer(d_bayes$treatmentA),
+  #treatmentB = as.integer(d_bayes$treatmentB),
+  response = scale(d_bayes$response)
+)
+
+f <- alist(
+  response ~ dnorm(mu, sigma),
+  mu <- a_trt[treatmentA] ,
+  ## adaptive priors  
+  a_trt[treatmentA] ~ dnorm(a_bar, sigma_A),
+
+  ## hyper priors  
+  a_bar ~ dnorm(0,1.5),
+  sigma ~ dexp(1),
+  sigma_A ~ dexp(1)
+ )
+
+mod <- rethinking::ulam(
+  f, data = data_list, chains = 4, iter = 8000, control=list(adapt_delta=0.99), cores = 4
+)
+
+post <- extract.samples(mod)
+a <- post$a_trt %>% as.data.frame()
+
+pairs <- outer(colnames(a), colnames(a), paste, sep="_")
+index <-  which(lower.tri(pairs, diag=TRUE))
+comparisons <- outer(1:ncol(a), 1:ncol(a), 
+              function(x,y) a[,x]-a[,y])
+colnames(comparisons) <- pairs
+comparisons <- comparisons[-index]
+
+## this gets us the number of comparisons that excluded zero  
+comparisons %>%
+  gather() %>%
+  group_by(key) %>%
+  mutate(mean = mean(value), lower_ci = quantile(value, 0.025), upper_ci = quantile(value, 0.975)) %>%
+  distinct(mean, .keep_all = TRUE) %>%
+  select(-c(value)) %>%
+  mutate(less = ifelse(lower_ci <0 & upper_ci <0,1,0), more = ifelse(lower_ci >0 & upper_ci >0,1,0)) %>%
+  mutate(tot = less + more) %>%
+  ungroup() %>%
+  summarise(total_significant_comparisons = sum(tot)) %>%
+  pull()
+} 
+  
+```
+
+## bayes sim  
+
+```{r}
+seeds <- sample(1:10000,1000, replace = FALSE)
+t1 <- Sys.time()
+out <- purrr::map(seeds, ~bayes_aov_sim(seed = .x))
+t2 <- Sys.time()
+```
+
+
+
+
+### BRMS  
+
+
+```{r}
+
+bayes_aov_sim <- function(seed) {
+  
+  set.seed(seed)
+  
+  
+  d_bayes <- tibble(treatmentA = rep(c(1,2,3,4,5), each = 3), response = rnorm(15,10,20))
+  
+  
+  
+  mod_brms <- update(mod_brms, newdata = d_bayes)
+  post <- brms::posterior_samples(mod_brms) %>% 
+    select(contains("r_treatmentA"))
+ 
+  
+  pairs <- outer(colnames(post), colnames(post), paste, sep="-")
+  index <-  which(lower.tri(pairs, diag=TRUE))
+  comparisons <- outer(1:ncol(post), 1:ncol(post), 
+                       function(x,y) post[,x]-post[,y])
+  colnames(comparisons) <- pairs
+  comparisons <- comparisons[-index]
+  
+
+  ## this gets us the number of comparisons that excluded zero  
+  comparisons %>%
+    gather() %>%
+    group_by(key) %>%
+    mutate(mean = mean(value), lower_ci = quantile(value, 0.025), upper_ci = quantile(value, 0.975)) %>%
+    distinct(mean, .keep_all = TRUE) %>%
+    select(-c(value)) %>%
+    mutate(less = ifelse(lower_ci <0 & upper_ci <0,1,0), more = ifelse(lower_ci >0 & upper_ci >0,1,0)) %>%
+    mutate(tot = less + more) %>%
+    ungroup() %>%
+    summarise(total_significant_comparisons = sum(tot)) %>%
+    pull()
+} 
+```
+
+ 
+
+
+```{r}
+## initialize a model  
+  d_bayes <- tibble(treatmentA = rep(c(1,2,3,4,5), each = 3), response = rnorm(15,10,20))
+  mod_brms <- brms::brm(response ~  (1|treatmentA), data = d_bayes, chains = 4, cores = 4)
+
+seeds <- sample(1:10000,1000, replace = FALSE)
+t1 <- Sys.time()
+out <- purrr::map(seeds, ~bayes_aov_sim(seed = .x))
+t2 <- Sys.time()
+t2-t1
+
+```
+
+Results - 
+
+```{r}
+out %>% simplify() -> out
+
+sum(out)
+
+## How many times did we see atleast one pairwise comparison significant?   
+(1000 - sum(out==0))/1000
+
+as.data.frame(cbind(seeds,out)) %>%
+ggplot(.,aes(seeds, out)) + geom_point()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
